@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/v1/config.json",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devPath": "http://localhost:1420",
+    "distDir": "../dist"
+  },
+  "package": {
+    "productName": "mesh-audio",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "bundle": {
+      "active": true,
+      "targets": "all",
+      "identifier": "com.monosound.meshaudio",
+      "icon": [
+        "icons/icon.ico",
+        "icons/icon.png",
+        "icons/icon.icns"
+      ]
+    },
+    "windows": [
+      {
+        "title": "mesh-audio",
+        "width": 780,
+        "height": 1000,
+        "resizable": false,
+        "center": true,
+        "minWidth": 780,
+        "minHeight": 820,
+        "maxWidth": 780,
+        "maxHeight": 1000
+      }
+    ],
+    "systemTray": {
+      "iconPath": "icons/tray-icon.png",
+      "iconAsTemplate": true
+    }
+  }
+}
