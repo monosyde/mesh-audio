@@ -1,6 +1,6 @@
 {
   "name": "mesh-audio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -26,4 +26,3 @@
     "vite": "^4.4.9"
   }
 }
-

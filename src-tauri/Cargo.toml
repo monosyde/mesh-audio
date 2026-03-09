@@ -1,6 +1,6 @@
 [package]
 name = "mesh-audio"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["monoAPO"]
 edition = "2021"
 description = "Equalizer APO Config Switcher rewritten in Tauri"

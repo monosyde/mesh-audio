@@ -87,8 +87,8 @@ mod platform {
     selected_ids: Mutex<Vec<String>>,
     worker: Mutex<Option<MirrorWorker>>,
     volumes: Mutex<HashMap<String, f32>>,
-    settings: Mutex<(u32, u32, bool)>, // (warmup_ms, ring_ms, auto_adjust)
-    delays: Mutex<HashMap<String, u32>>, // per-device delay placeholder
+    settings: Mutex<(u32, u32, bool, u32)>, // (warmup_ms, ring_ms, auto_adjust, global_delay_ms)
+    delays: Mutex<HashMap<String, i32>>, // signed per-device offset in ms
   }
 
   impl AudioMirrorService {
@@ -98,7 +98,7 @@ mod platform {
           selected_ids: Mutex::new(Vec::new()),
           worker: Mutex::new(None),
           volumes: Mutex::new(HashMap::new()),
-          settings: Mutex::new((40, 200, false)),
+          settings: Mutex::new((40, 200, false, 70)),
           delays: Mutex::new(HashMap::new()),
         }),
       }
@@ -190,20 +190,27 @@ mod platform {
       Ok(())
     }
 
-    pub fn get_sync_settings(&self) -> (u32, u32) {
+    pub fn get_sync_settings(&self) -> (u32, u32, bool, u32) {
       let s = *self.inner.settings.lock().unwrap();
-      (s.0, s.1)
+      (s.0, s.1, s.2, s.3)
     }
 
-    pub fn set_sync_settings(&self, warmup_ms: u32, ring_ms: u32) {
+    pub fn set_sync_settings(&self, warmup_ms: u32, ring_ms: u32, global_delay_ms: u32) {
       let mut s = self.inner.settings.lock().unwrap();
       s.0 = warmup_ms.min(1000);
       s.1 = ring_ms.clamp(100, 2000);
+      s.3 = global_delay_ms.min(2000);
+      if let Some(w) = self.inner.worker.lock().unwrap().as_ref() {
+        let _ = w.tx.send(Control::SetSettings(s.0, s.1, s.3));
+      }
     }
 
     pub fn set_auto_adjust(&self, enabled: bool) {
       let mut s = self.inner.settings.lock().unwrap();
       s.2 = enabled;
+      if let Some(w) = self.inner.worker.lock().unwrap().as_ref() {
+        let _ = w.tx.send(Control::SetAutoAdjust(enabled));
+      }
     }
 
     pub fn resync_now(&self) {
@@ -212,12 +219,16 @@ mod platform {
       }
     }
 
-    pub fn set_device_delay(&self, device_id: String, delay_ms: u32) {
-      let clamped = delay_ms.min(2000);
+    pub fn set_device_delay(&self, device_id: String, delay_ms: i32) {
+      let clamped = delay_ms.clamp(-800, 800);
       self.inner.delays.lock().unwrap().insert(device_id.clone(), clamped);
       if let Some(w) = self.inner.worker.lock().unwrap().as_ref() {
         let _ = w.tx.send(Control::SetDelay(device_id, clamped));
       }
+    }
+
+    pub fn get_device_delays(&self) -> HashMap<String, i32> {
+      self.inner.delays.lock().unwrap().clone()
     }
 
     pub fn stop(&self) {
@@ -239,7 +250,15 @@ mod platform {
 
     pub fn status(&self) -> MirrorStatus {
       let selected = self.inner.selected_ids.lock().unwrap().clone();
-      let enabled = !selected.is_empty() && self.inner.worker.lock().unwrap().is_some();
+      let enabled = !selected.is_empty()
+        && self
+          .inner
+          .worker
+          .lock()
+          .unwrap()
+          .as_ref()
+          .map(|w| w.is_running())
+          .unwrap_or(false);
       let targets = self
         .list_devices()
         .unwrap_or_default()
@@ -253,6 +272,7 @@ mod platform {
 
   struct MirrorWorker {
     stop_flag: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
     tx: std::sync::mpsc::Sender<Control>,
   }
@@ -260,7 +280,9 @@ mod platform {
   enum Control {
     SetVolume(String, f32),
     DefaultChanged,
-    SetDelay(String, u32),
+    SetDelay(String, i32),
+    SetSettings(u32, u32, u32),
+    SetAutoAdjust(bool),
     Resync,
   }
 
@@ -338,20 +360,23 @@ mod platform {
     fn spawn(
       device_ids: Vec<String>,
       initial_volumes: std::collections::HashMap<String, f32>,
-      initial_delays: std::collections::HashMap<String, u32>,
-      settings: (u32, u32, bool),
+      initial_delays: std::collections::HashMap<String, i32>,
+      settings: (u32, u32, bool, u32),
     ) -> Result<Self, AppError> {
       let stop_flag = Arc::new(AtomicBool::new(false));
       let stop_clone = stop_flag.clone();
+      let running = Arc::new(AtomicBool::new(true));
+      let running_clone = running.clone();
       let (tx, rx) = std::sync::mpsc::channel::<Control>();
       let tx_clone = tx.clone();
       let handle = thread::spawn(move || {
         if let Err(err) = unsafe { run_loop(device_ids, initial_volumes, initial_delays, settings, stop_clone, rx, tx_clone) } {
           eprintln!("Audio mirror thread failed: {err}");
         }
+        running_clone.store(false, Ordering::SeqCst);
       });
 
-      Ok(Self { stop_flag, handle: Some(handle), tx })
+      Ok(Self { stop_flag, running, handle: Some(handle), tx })
     }
 
     fn set_volume(&self, id: String, v: f32) {
@@ -363,6 +388,11 @@ mod platform {
       if let Some(handle) = self.handle.take() {
         let _ = handle.join();
       }
+      self.running.store(false, Ordering::SeqCst);
+    }
+
+    fn is_running(&self) -> bool {
+      self.running.load(Ordering::SeqCst)
     }
   }
 
@@ -400,12 +430,21 @@ mod platform {
         self.buf[..].copy_from_slice(tail);
         self.start = 0;
         self.len = self.cap;
+        for reader in &mut self.readers {
+          *reader = self.len;
+        }
         return;
       }
       while self.len + data.len() > self.cap {
         let drop_len = (self.len + data.len()) - self.cap;
         self.start = (self.start + drop_len) % self.cap;
         self.len -= drop_len;
+        for reader in &mut self.readers {
+          *reader = reader.saturating_sub(drop_len);
+          if *reader > self.len {
+            *reader = self.len;
+          }
+        }
       }
       let end = (self.start + self.len) % self.cap;
       let first = (self.cap - end).min(data.len());
@@ -440,6 +479,19 @@ mod platform {
     }
 
     fn len_bytes(&self) -> usize { self.len }
+
+    fn available_for(&mut self, reader_idx: usize) -> usize {
+      self.ensure_reader(reader_idx);
+      self.len.saturating_sub(self.readers[reader_idx])
+    }
+
+    fn skip_for(&mut self, reader_idx: usize, bytes: usize) -> usize {
+      self.ensure_reader(reader_idx);
+      let available = self.len.saturating_sub(self.readers[reader_idx]);
+      let take = bytes.min(available);
+      self.readers[reader_idx] += take;
+      take
+    }
 
     fn gc(&mut self) {
       if self.readers.is_empty() { return; }
@@ -600,8 +652,8 @@ mod platform {
   unsafe fn run_loop(
     device_ids: Vec<String>,
     initial_volumes: std::collections::HashMap<String, f32>,
-    mut device_delays: std::collections::HashMap<String, u32>,
-    settings: (u32, u32, bool),
+    mut device_delays: std::collections::HashMap<String, i32>,
+    settings: (u32, u32, bool, u32),
     stop_flag: Arc<AtomicBool>,
     rx: std::sync::mpsc::Receiver<Control>,
     tx: std::sync::mpsc::Sender<Control>,
@@ -623,6 +675,11 @@ mod platform {
     let mut capture = initialize_capture(&default_device)?;
     let mut last_default_id = get_device_id(&default_device)?;
     let mut last_check = std::time::Instant::now();
+
+    let mut warmup_ms = settings.0.min(1000);
+    let mut ring_ms = settings.1.clamp(100, 2000);
+    let mut auto_adjust = settings.2;
+    let mut global_delay_ms = settings.3.min(2000);
 
     let mut renderers: Vec<RenderDevice> = Vec::new();
     let mut target_ids: Vec<String> = Vec::new();
@@ -651,53 +708,20 @@ mod platform {
     // Ring buffer ~ configurable ms
     let mut frame_bytes = capture.frame_size as usize;
     let mut sample_rate = (*capture.format).nSamplesPerSec as usize;
-    let mut ring = RingBuffer::new(((sample_rate as u64 * settings.1 as u64 / 1000) as usize) * frame_bytes);
+    let mut ring = RingBuffer::new(ring_capacity_bytes(sample_rate, frame_bytes, ring_ms));
 
     capture.start()?;
-
-    // Warm-up: accumulate a small amount of audio in ring to align renderers
-    {
-      let warmup_ms = settings.0 as usize;
-      let warmup_bytes_target = ((sample_rate * warmup_ms / 1000) * frame_bytes) as usize;
-      let warmup_deadline = std::time::Instant::now() + Duration::from_millis(120);
-      while ring.len_bytes() < warmup_bytes_target && std::time::Instant::now() < warmup_deadline {
-        let res = WaitForMultipleObjects(&[capture.event], false, 20);
-        if res == WAIT_TIMEOUT { continue; }
-        // drain capture once
-        loop {
-          let packet = capture
-            .capture_client
-            .GetNextPacketSize()
-            .map_err(win_to_app_err("GetNextPacketSize"))?;
-          if packet == 0 { break; }
-          let mut data_ptr: *mut u8 = std::ptr::null_mut();
-          let mut frames = 0u32;
-          let mut flags = 0u32;
-          capture
-            .capture_client
-            .GetBuffer(&mut data_ptr, &mut frames, &mut flags, None, None)
-            .map_err(win_to_app_err("GetBuffer"))?;
-          let bytes = frames as usize * frame_bytes;
-          if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data_ptr.is_null() {
-            ring.push_silence(bytes);
-          } else {
-            let slice = std::slice::from_raw_parts(data_ptr as *const u8, bytes);
-            ring.push(slice);
-          }
-          capture
-            .capture_client
-            .ReleaseBuffer(frames)
-            .map_err(win_to_app_err("ReleaseBuffer"))?;
-        }
-      }
-    }
+    warmup_capture(&capture, &mut ring, frame_bytes, sample_rate, warmup_ms)?;
 
     for (idx, renderer) in renderers.iter().enumerate() {
       renderer.start()?;
-      if let Some(delay_ms) = device_delays.get(&target_ids[idx]).copied() {
-        if delay_ms > 0 {
-          let silence_frames = ((*capture.format).nSamplesPerSec as u64 * delay_ms as u64 / 1000) as u32;
-          if silence_frames > 0 { let _ = renderer.write(None, silence_frames); }
+      if let Some(offset_ms) = device_delays.get(&target_ids[idx]).copied() {
+        let target_ms = (global_delay_ms as i64 + offset_ms as i64).max(0) as u32;
+        if target_ms > 0 {
+          let silence_frames = ((*capture.format).nSamplesPerSec as u64 * target_ms as u64 / 1000) as u32;
+          if silence_frames > 0 {
+            let _ = renderer.write(None, silence_frames);
+          }
         }
       }
     }
@@ -712,8 +736,9 @@ mod platform {
               handles[0] = capture.event;
               frame_bytes = capture.frame_size as usize;
               sample_rate = (*capture.format).nSamplesPerSec as usize;
-              ring = RingBuffer::new(((sample_rate as u64 * 200 / 1000) as usize) * frame_bytes);
+              ring = RingBuffer::new(ring_capacity_bytes(sample_rate, frame_bytes, ring_ms));
               capture.start()?;
+              warmup_capture(&capture, &mut ring, frame_bytes, sample_rate, warmup_ms)?;
               last_default_id = cur_id;
             }
           }
@@ -739,17 +764,38 @@ mod platform {
             handles[0] = capture.event;
             frame_bytes = capture.frame_size as usize;
             sample_rate = (*capture.format).nSamplesPerSec as usize;
-            ring = RingBuffer::new(((sample_rate as u64 * settings.1 as u64 / 1000) as usize) * frame_bytes);
+            ring = RingBuffer::new(ring_capacity_bytes(sample_rate, frame_bytes, ring_ms));
             capture.start()?;
+            warmup_capture(&capture, &mut ring, frame_bytes, sample_rate, warmup_ms)?;
           }
           Control::SetDelay(id, ms) => {
             device_delays.insert(id.clone(), ms);
             for (idx, rid) in target_ids.iter().enumerate() {
               if *rid == id {
-                let frames = ((*capture.format).nSamplesPerSec as u64 * ms as u64 / 1000) as u32;
+                let target_ms = (global_delay_ms as i64 + ms as i64).max(0) as u32;
+                let frames = ((*capture.format).nSamplesPerSec as u64 * target_ms as u64 / 1000) as u32;
                 if frames > 0 { let _ = renderers[idx].write(None, frames); }
               }
             }
+          }
+          Control::SetSettings(new_warmup, new_ring, new_global_delay) => {
+            warmup_ms = new_warmup.min(1000);
+            ring_ms = new_ring.clamp(100, 2000);
+            global_delay_ms = new_global_delay.min(2000);
+            let cur_dev = enumerator
+              .GetDefaultAudioEndpoint(eRender, eConsole)
+              .map_err(win_to_app_err("GetDefaultAudioEndpoint"))?;
+            capture.stop();
+            capture = initialize_capture(&cur_dev)?;
+            handles[0] = capture.event;
+            frame_bytes = capture.frame_size as usize;
+            sample_rate = (*capture.format).nSamplesPerSec as usize;
+            ring = RingBuffer::new(ring_capacity_bytes(sample_rate, frame_bytes, ring_ms));
+            capture.start()?;
+            warmup_capture(&capture, &mut ring, frame_bytes, sample_rate, warmup_ms)?;
+          }
+          Control::SetAutoAdjust(enabled) => {
+            auto_adjust = enabled;
           }
           Control::Resync => {
             let cur_dev = enumerator
@@ -760,8 +806,9 @@ mod platform {
             handles[0] = capture.event;
             frame_bytes = capture.frame_size as usize;
             sample_rate = (*capture.format).nSamplesPerSec as usize;
-            ring = RingBuffer::new(((sample_rate as u64 * settings.1 as u64 / 1000) as usize) * frame_bytes);
+            ring = RingBuffer::new(ring_capacity_bytes(sample_rate, frame_bytes, ring_ms));
             capture.start()?;
+            warmup_capture(&capture, &mut ring, frame_bytes, sample_rate, warmup_ms)?;
           }
         }
       }
@@ -811,16 +858,56 @@ mod platform {
           let padding = r.client.GetCurrentPadding().map_err(win_to_app_err("GetCurrentPadding"))?;
           let available = r.buffer_size.saturating_sub(padding);
           if available > 0 {
-            let need_bytes = available as usize * r.frame_size as usize;
-            let chunk = ring.read_for(ridx, need_bytes);
+            let frame_bytes = r.frame_size as usize;
+            let need_bytes = available as usize * frame_bytes;
+
+            let mut silence_prefix_bytes = 0usize;
+            let offset_ms = device_delays.get(&target_ids[ridx]).copied().unwrap_or(0);
+            let base_target_ms = global_delay_ms.max(warmup_ms.max(35)).min(ring_ms.saturating_sub(20).max(35));
+            let desired_total_ms = (base_target_ms as i64 + offset_ms as i64)
+              .clamp(20, ring_ms.saturating_sub(10).max(20) as i64) as u64;
+            let desired_delay_bytes =
+              ((sample_rate as u64 * desired_total_ms / 1000) as usize) * frame_bytes;
+            let tolerance_ms = if auto_adjust { 12 } else { 6 };
+            let max_adjust_ms = if auto_adjust { 8 } else { 4 };
+            let tolerance_bytes = ((sample_rate as u64 * tolerance_ms / 1000) as usize) * frame_bytes;
+            let max_adjust_bytes = ((sample_rate as u64 * max_adjust_ms / 1000) as usize) * frame_bytes;
+            let min_headroom_bytes = ((sample_rate as u64 * 15 / 1000) as usize) * frame_bytes;
+
+            let current_available = ring.available_for(ridx);
+            if current_available > desired_delay_bytes.saturating_add(tolerance_bytes) {
+              let excess = current_available - desired_delay_bytes;
+              let to_skip = excess.min(max_adjust_bytes);
+              let max_skippable = current_available.saturating_sub(min_headroom_bytes);
+              let aligned = (to_skip.min(max_skippable) / frame_bytes) * frame_bytes;
+              if aligned > 0 {
+                let _ = ring.skip_for(ridx, aligned);
+              }
+            } else if current_available.saturating_add(tolerance_bytes) < desired_delay_bytes {
+              let deficit = desired_delay_bytes - current_available;
+              let inject = deficit.min(max_adjust_bytes).min(need_bytes / 4);
+              silence_prefix_bytes = (inject / frame_bytes) * frame_bytes;
+            }
+
+            let data_need_bytes = need_bytes.saturating_sub(silence_prefix_bytes);
+            let chunk = ring.read_for(ridx, data_need_bytes);
             if chunk.is_empty() {
+              if auto_adjust {
+                thread::sleep(Duration::from_millis(1));
+              }
               r.write(None, available)?;
             } else {
-              let frames = (chunk.len() / r.frame_size as usize) as u32;
+              if silence_prefix_bytes > 0 {
+                let silence_frames = (silence_prefix_bytes / frame_bytes) as u32;
+                if silence_frames > 0 {
+                  r.write(None, silence_frames)?;
+                }
+              }
+              let frames = (chunk.len() / frame_bytes) as u32;
               r.write(Some(&chunk), frames)?;
-              let written_bytes = frames as usize * r.frame_size as usize;
+              let written_bytes = frames as usize * frame_bytes + silence_prefix_bytes;
               if written_bytes < need_bytes {
-                let remain_frames = ((need_bytes - written_bytes) / r.frame_size as usize) as u32;
+                let remain_frames = ((need_bytes - written_bytes) / frame_bytes) as u32;
                 if remain_frames > 0 { r.write(None, remain_frames)?; }
               }
             }
@@ -837,6 +924,61 @@ mod platform {
     // Unregister and finish
     let _ = enumerator.UnregisterEndpointNotificationCallback(&sink_iface);
     // Loop finished cleanly
+    Ok(())
+  }
+
+  fn ring_capacity_bytes(sample_rate: usize, frame_bytes: usize, ring_ms: u32) -> usize {
+    let bytes = ((sample_rate as u64 * ring_ms as u64 / 1000) as usize) * frame_bytes;
+    bytes.max(frame_bytes.max(1))
+  }
+
+  unsafe fn warmup_capture(
+    capture: &CaptureDevice,
+    ring: &mut RingBuffer,
+    frame_bytes: usize,
+    sample_rate: usize,
+    warmup_ms: u32,
+  ) -> Result<(), AppError> {
+    let warmup_bytes_target = ((sample_rate * warmup_ms as usize / 1000) * frame_bytes) as usize;
+    let warmup_deadline = std::time::Instant::now() + Duration::from_millis(120);
+    while ring.len_bytes() < warmup_bytes_target && std::time::Instant::now() < warmup_deadline {
+      let res = WaitForMultipleObjects(&[capture.event], false, 20);
+      if res == WAIT_TIMEOUT {
+        continue;
+      }
+
+      loop {
+        let packet = capture
+          .capture_client
+          .GetNextPacketSize()
+          .map_err(win_to_app_err("GetNextPacketSize"))?;
+        if packet == 0 {
+          break;
+        }
+
+        let mut data_ptr: *mut u8 = std::ptr::null_mut();
+        let mut frames = 0u32;
+        let mut flags = 0u32;
+        capture
+          .capture_client
+          .GetBuffer(&mut data_ptr, &mut frames, &mut flags, None, None)
+          .map_err(win_to_app_err("GetBuffer"))?;
+
+        let bytes = frames as usize * frame_bytes;
+        if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data_ptr.is_null() {
+          ring.push_silence(bytes);
+        } else {
+          let slice = std::slice::from_raw_parts(data_ptr as *const u8, bytes);
+          ring.push(slice);
+        }
+
+        capture
+          .capture_client
+          .ReleaseBuffer(frames)
+          .map_err(win_to_app_err("ReleaseBuffer"))?;
+      }
+    }
+
     Ok(())
   }
 

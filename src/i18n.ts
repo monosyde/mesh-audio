@@ -1,8 +1,140 @@
 type Dict = Record<string, string>;
-const ru: Dict = { app_title: "Monosound", loading_label: "Загрузка", tab_devices:"Устройства", tab_sync:"Синхронизация",
-devices_title:"Зеркалирование вывода", devices_refresh:"Обновить список", devices_empty:"Активных устройств вывода не найдено. Подключите устройства.", devices_default:"Устройство по умолчанию (источник)", devices_secondary:"Доп. устройство", apply_selection:"Применить выбор", disable_mirroring:"Выключить зеркалирование", stop_mirror:"Остановить зеркалирование", mirrored_targets:"Зеркалим на:", none:"нет", sync_title:"Настройки синхронизации", warmup_ms:"Прогрев (мс)", ring_ms:"Кольцевой буфер (мс)", apply_settings:"Применить настройки", auto_adjust:"Автоподстройка", resync_now:"Ресинхронизировать", per_device_delay:"Задержка на устройство (мс)", select_on_devices:"Выберите устройства на вкладке Устройства" };
-const en: Dict = { app_title: "Monosound", loading_label: "Loading", tab_devices:"Devices", tab_sync:"Sync Settings",
-devices_title:"Output mirroring", devices_refresh:"Refresh devices", devices_empty:"No active output devices. Please connect.", devices_default:"Default device (source)", devices_secondary:"Secondary device", apply_selection:"Apply selection", disable_mirroring:"Disable mirroring", stop_mirror:"Stop mirror", mirrored_targets:"Mirroring to:", none:"none", sync_title:"Sync Settings", warmup_ms:"Warm‑up (ms)", ring_ms:"Ring buffer (ms)", apply_settings:"Apply settings", auto_adjust:"Auto adjust", resync_now:"Re‑sync now", per_device_delay:"Per‑device delay (ms)", select_on_devices:"Select devices on the Devices tab" };
-const locales: Record<string, Dict> = { ru, en }; let current='ru';
-export function setLocale(l:'ru'|'en'){ current=l; }
-export function t(key:string){ return locales[current][key] ?? key; }
+
+const ru: Dict = {
+  app_title: "Monosound",
+  loading_label: "Загрузка",
+  tab_devices: "Устройства",
+  tab_sync: "Синхронизация",
+  tab_vb: "VB-Cable",
+
+  devices_title: "Зеркалирование вывода",
+  devices_refresh: "Обновить список",
+  devices_empty: "Активных устройств вывода не найдено. Подключите устройства.",
+  devices_default: "Устройство по умолчанию (источник)",
+  devices_secondary: "Доп. устройство",
+  apply_selection: "Применить выбор",
+  disable_mirroring: "Выключить зеркалирование",
+  stop_mirror: "Остановить зеркалирование",
+  mirrored_targets: "Зеркалим на:",
+  none: "нет",
+
+  sync_title: "Настройки синхронизации",
+  warmup_ms: "Прогрев (мс)",
+  ring_ms: "Кольцевой буфер (мс)",
+  apply_settings: "Применить настройки",
+  auto_adjust: "Автоподстройка",
+  resync_now: "Ресинхронизировать",
+  per_device_delay: "Задержка на устройство (мс)",
+  select_on_devices: "Выберите устройства на вкладке Устройства",
+
+  vb_title: "Режим VB-Cable",
+  vb_intro: "Этот режим нужен, если нужно точнее синхронизировать все колонки между собой, включая сценарии где текущее default-устройство слишком позднее.",
+  vb_status_title: "Статус установки",
+  vb_status_checking: "проверка...",
+  vb_status_ok: "установлен",
+  vb_status_missing: "не обнаружен",
+  vb_default_unknown: "не найдено",
+  vb_default_ok: "ОК: VB-Cable используется как источник по умолчанию",
+  vb_default_warn: "Предупреждение: источник по умолчанию не VB-Cable",
+  vb_install: "Установить VB-Cable",
+  vb_installing: "Установка...",
+  vb_recheck: "Проверить снова",
+  vb_reboot_hint: "После установки драйвера обычно требуется перезагрузка Windows.",
+  vb_steps_hint_title: "Как настроить",
+  vb_step_title: "Пошаговая настройка",
+  vb_step_1: "Установи VB-CABLE и перезагрузи систему.",
+  vb_step_2: "В Windows: Output по умолчанию = CABLE Input (VB-Audio).",
+  vb_step_3: "В твоем плеере/браузере звук пойдет в CABLE Input.",
+  vb_step_4: "Открой Audio Repeater (KS/WDM) и направь CABLE Output на физические колонки.",
+  vb_step_5: "Для каждой колонки можно задать отдельную буферизацию/задержку в Repeater.",
+  vb_step_6: "В Monosound на вкладке Sync донастрой offset и включи Auto adjust только для дрейфа.",
+  vb_check_title: "Что проверить",
+  vb_check_1: "В системном микшере активен именно CABLE Input как default output.",
+  vb_check_2: "Ни одна колонка не играет напрямую мимо цепочки CABLE.",
+  vb_check_3: "На всех звеньях одинаковый sample rate (например, 48 kHz).",
+  vb_check_4: "Если слышны дропы, сначала увеличь буфер, потом поджимай задержки.",
+  vb_why_title: "Почему это помогает",
+  vb_why_text: "VB-Cable делает единый управляемый источник. В этом случае легче сводить устройства к общей временной базе, чем при loopback с системного default-выхода.",
+  vb_active_outputs: "Active outputs",
+  vb_profiles_title: "VB Sync Profiles",
+  vb_apply_profile: "Применить профиль",
+  vb_device_delays_title: "Device delays",
+  vb_no_active_mirrors: "Нет активных зеркалируемых выходов. Выбери устройства в Active outputs.",
+  vb_apply_all_delays: "Apply all delays",
+  vb_reset_all_delays: "Reset all delays"
+};
+
+const en: Dict = {
+  app_title: "Monosound",
+  loading_label: "Loading",
+  tab_devices: "Devices",
+  tab_sync: "Sync Settings",
+  tab_vb: "VB-Cable",
+
+  devices_title: "Output mirroring",
+  devices_refresh: "Refresh devices",
+  devices_empty: "No active output devices. Please connect.",
+  devices_default: "Default device (source)",
+  devices_secondary: "Secondary device",
+  apply_selection: "Apply selection",
+  disable_mirroring: "Disable mirroring",
+  stop_mirror: "Stop mirror",
+  mirrored_targets: "Mirroring to:",
+  none: "none",
+
+  sync_title: "Sync Settings",
+  warmup_ms: "Warm-up (ms)",
+  ring_ms: "Ring buffer (ms)",
+  apply_settings: "Apply settings",
+  auto_adjust: "Auto adjust",
+  resync_now: "Re-sync now",
+  per_device_delay: "Per-device delay (ms)",
+  select_on_devices: "Select devices on the Devices tab",
+
+  vb_title: "VB-Cable Mode",
+  vb_intro: "Use this path when you need tighter sync between all speakers, including cases where the current default device is inherently late.",
+  vb_status_title: "Install status",
+  vb_status_checking: "checking...",
+  vb_status_ok: "installed",
+  vb_status_missing: "not detected",
+  vb_default_unknown: "not found",
+  vb_default_ok: "OK: VB-Cable is used as default source",
+  vb_default_warn: "Warning: default source is not VB-Cable",
+  vb_install: "Install VB-Cable",
+  vb_installing: "Installing...",
+  vb_recheck: "Re-check",
+  vb_reboot_hint: "A Windows reboot is usually required after driver installation.",
+  vb_steps_hint_title: "How to set up",
+  vb_step_title: "Setup steps",
+  vb_step_1: "Install VB-CABLE and reboot.",
+  vb_step_2: "In Windows, set default Output = CABLE Input (VB-Audio).",
+  vb_step_3: "Your player/browser will now send audio into CABLE Input.",
+  vb_step_4: "Open Audio Repeater (KS/WDM) and route CABLE Output to physical speakers.",
+  vb_step_5: "Set per-speaker buffering/delay in Repeater.",
+  vb_step_6: "In Monosound Sync tab, fine-tune offsets and keep Auto adjust for drift only.",
+  vb_check_title: "Checklist",
+  vb_check_1: "Default system output is CABLE Input.",
+  vb_check_2: "No speaker is playing directly outside the CABLE chain.",
+  vb_check_3: "Same sample rate across all stages (for example 48 kHz).",
+  vb_check_4: "If you hear dropouts: increase buffers first, then reduce latency.",
+  vb_why_title: "Why this helps",
+  vb_why_text: "VB-Cable creates a single controllable source clock, which is easier to align than loopback from a moving system default sink.",
+  vb_active_outputs: "Active outputs",
+  vb_profiles_title: "VB Sync Profiles",
+  vb_apply_profile: "Apply profile",
+  vb_device_delays_title: "Device delays",
+  vb_no_active_mirrors: "No active mirrored outputs. Select devices in Active outputs first.",
+  vb_apply_all_delays: "Apply all delays",
+  vb_reset_all_delays: "Reset all delays"
+};
+
+const locales: Record<string, Dict> = { ru, en };
+let current = 'ru';
+
+export function setLocale(l: 'ru' | 'en') {
+  current = l;
+}
+
+export function t(key: string) {
+  return locales[current][key] ?? key;
+}
